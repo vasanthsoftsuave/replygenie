@@ -1,3 +1,7 @@
 <resources>
-    <string name="app_name">ReplyGenie</string>
+    <string name="app_name">RephraseGenie</string>
+
+    <string name="accessibility_service_label">RephraseGenie</string>
+    <string name="accessibility_service_summary">Show the rephrase bubble when you type</string>
+    <string name="accessibility_service_description">RephraseGenie shows a small bubble next to the text field you are typing in. Tap it to rewrite what you wrote in a different tone. It reads the text of the field you are in only when you tap the bubble, and writes the rewritten text back into that same field. It never reads other people\'s messages, and your text is never stored on the device.</string>
 </resources>
