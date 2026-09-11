@@ -14,6 +14,17 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Block
+import androidx.compose.material.icons.outlined.Brush
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Palette
+import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material.icons.outlined.Save
+import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.WifiTethering
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,6 +41,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.rephrasegenie.domain.model.ThemeMode
 import com.example.rephrasegenie.domain.model.Tone
 import com.example.rephrasegenie.ui.components.AppIcon
+import com.example.rephrasegenie.ui.components.AppScaffold
 import com.example.rephrasegenie.ui.components.AppTextField
 import com.example.rephrasegenie.ui.components.Badge
 import com.example.rephrasegenie.ui.components.DangerButton
@@ -37,6 +49,7 @@ import com.example.rephrasegenie.ui.components.EmptyState
 import com.example.rephrasegenie.ui.components.ErrorCard
 import com.example.rephrasegenie.ui.components.FieldHint
 import com.example.rephrasegenie.ui.components.FieldLabel
+import com.example.rephrasegenie.ui.components.IconActionButton
 import com.example.rephrasegenie.ui.components.PrimaryButton
 import com.example.rephrasegenie.ui.components.SecondaryButton
 import com.example.rephrasegenie.ui.components.SectionCard
@@ -68,50 +81,37 @@ fun SettingsScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     val colors = AppTheme.colors
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(colors.background)
-            .verticalScroll(rememberScrollState())
-            .padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        Spacer(Modifier.height(16.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
+    AppScaffold(title = "Settings", onBack = onBack) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Text(
-                text = "Settings",
-                style = MaterialTheme.typography.headlineSmall,
-                color = colors.textPrimary,
+            state.error?.let { ErrorCard(message = it) }
+            state.message?.let { message ->
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.success,
+                )
+            }
+
+            ProfileCard(state = state, viewModel = viewModel)
+            AppearanceCard(state = state, viewModel = viewModel)
+            BehaviourCard(state = state, viewModel = viewModel)
+            BlockedAppsCard(state = state, viewModel = viewModel, onAddBlockedApp = onAddBlockedApp)
+            CustomTonesCard(
+                state = state,
+                viewModel = viewModel,
+                onNewTone = onNewTone,
+                onEditTone = onEditTone,
             )
-            SecondaryButton(text = "Done", onClick = onBack)
+
+            Spacer(Modifier.height(24.dp))
         }
-
-        state.error?.let { ErrorCard(message = it) }
-        state.message?.let { message ->
-            Text(
-                text = message,
-                style = MaterialTheme.typography.bodySmall,
-                color = colors.success,
-            )
-        }
-
-        ProfileCard(state = state, viewModel = viewModel)
-        AppearanceCard(state = state, viewModel = viewModel)
-        BehaviourCard(state = state, viewModel = viewModel)
-        BlockedAppsCard(state = state, viewModel = viewModel, onAddBlockedApp = onAddBlockedApp)
-        CustomTonesCard(
-            state = state,
-            viewModel = viewModel,
-            onNewTone = onNewTone,
-            onEditTone = onEditTone,
-        )
-
-        Spacer(Modifier.height(24.dp))
     }
 }
 
@@ -120,7 +120,7 @@ private fun ProfileCard(state: SettingsUiState, viewModel: SettingsViewModel) {
     val colors = AppTheme.colors
 
     SectionCard {
-        SectionTitle("Profile & AI")
+        SectionTitle("Profile & AI", icon = Icons.Outlined.Person)
 
         FieldLabel("Username")
         AppTextField(
@@ -157,6 +157,7 @@ private fun ProfileCard(state: SettingsUiState, viewModel: SettingsViewModel) {
         ) {
             SecondaryButton(
                 text = "Test Connection",
+                icon = Icons.Outlined.WifiTethering,
                 onClick = viewModel::testConnection,
                 enabled = !state.savingProfile,
                 loading = state.connectionTest == ConnectionTest.TESTING,
@@ -176,6 +177,7 @@ private fun ProfileCard(state: SettingsUiState, viewModel: SettingsViewModel) {
 
         PrimaryButton(
             text = "Save profile",
+            icon = Icons.Outlined.Save,
             onClick = viewModel::saveProfile,
             modifier = Modifier.fillMaxWidth(),
             enabled = state.profileChanged,
@@ -187,7 +189,7 @@ private fun ProfileCard(state: SettingsUiState, viewModel: SettingsViewModel) {
 @Composable
 private fun AppearanceCard(state: SettingsUiState, viewModel: SettingsViewModel) {
     SectionCard {
-        SectionTitle("Appearance")
+        SectionTitle("Appearance", icon = Icons.Outlined.Palette)
 
         FieldLabel("Theme")
         SegmentedChoice(
@@ -219,7 +221,7 @@ private fun AppearanceCard(state: SettingsUiState, viewModel: SettingsViewModel)
 @Composable
 private fun BehaviourCard(state: SettingsUiState, viewModel: SettingsViewModel) {
     SectionCard {
-        SectionTitle("Behaviour")
+        SectionTitle("Behaviour", icon = Icons.Outlined.Tune)
 
         FieldLabel("Default tone")
         FieldHint("Used when you tap the bubble. Long-press it to pick a different tone.")
@@ -284,7 +286,7 @@ private fun BlockedAppsCard(
     val colors = AppTheme.colors
 
     SectionCard {
-        SectionTitle("Blocked Apps")
+        SectionTitle("Blocked Apps", icon = Icons.Outlined.Block)
         FieldHint("RephraseGenie will never show the bubble in these apps.")
 
         if (state.blockedApps.isEmpty()) {
@@ -305,8 +307,10 @@ private fun BlockedAppsCard(
                         )
                         FieldHint(app.packageName)
                     }
-                    DangerButton(
-                        text = "Remove",
+                    IconActionButton(
+                        icon = Icons.Outlined.Delete,
+                        contentDescription = "Stop blocking " + app.label,
+                        tint = colors.danger,
                         onClick = { viewModel.unblockApp(app.packageName) },
                     )
                 }
@@ -314,7 +318,11 @@ private fun BlockedAppsCard(
         }
 
         Spacer(Modifier.height(4.dp))
-        SecondaryButton(text = "Add app", onClick = onAddBlockedApp)
+        SecondaryButton(
+            text = "Add app",
+            icon = Icons.Outlined.Add,
+            onClick = onAddBlockedApp,
+        )
     }
 }
 
@@ -329,7 +337,7 @@ private fun CustomTonesCard(
     var pendingDelete by remember { mutableStateOf<Tone?>(null) }
 
     SectionCard {
-        SectionTitle("Custom Tones")
+        SectionTitle("Custom Tones", icon = Icons.Outlined.Brush)
         FieldHint("Built-in tones cannot be edited or deleted.")
 
         if (state.customTones.isEmpty()) {
@@ -354,8 +362,17 @@ private fun CustomTonesCard(
                         )
                         if (tone.description.isNotBlank()) FieldHint(tone.description)
                     }
-                    SecondaryButton(text = "Edit", onClick = { onEditTone(tone.id) })
-                    DangerButton(text = "Delete", onClick = { pendingDelete = tone })
+                    IconActionButton(
+                        icon = Icons.Outlined.Edit,
+                        contentDescription = "Edit " + tone.name,
+                        onClick = { onEditTone(tone.id) },
+                    )
+                    IconActionButton(
+                        icon = Icons.Outlined.Delete,
+                        contentDescription = "Delete " + tone.name,
+                        tint = colors.danger,
+                        onClick = { pendingDelete = tone },
+                    )
                 }
             }
         }
@@ -372,6 +389,7 @@ private fun CustomTonesCard(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     DangerButton(
                         text = "Delete",
+                        icon = Icons.Outlined.Delete,
                         onClick = {
                             viewModel.deleteTone(tone.id)
                             pendingDelete = null
@@ -383,6 +401,6 @@ private fun CustomTonesCard(
         }
 
         Spacer(Modifier.height(4.dp))
-        SecondaryButton(text = "New tone", onClick = onNewTone)
+        SecondaryButton(text = "New tone", icon = Icons.Outlined.Add, onClick = onNewTone)
     }
 }

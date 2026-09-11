@@ -1,8 +1,13 @@
 <resources>
     <!--
-      Only used for the window before Compose draws. Real theming lives in
-      ui/theme/Theme.kt, which is driven by the user's saved settings.
-      The background matches the dark palette so there is no white flash on launch.
+      The launch window, shown between the process starting and Compose drawing its first frame.
+      It is deliberately the same dark as the intro video's background, so launch reads as one
+      continuous thing rather than a flash followed by a video. Android 12 and up add a system
+      splash on top of this; values-v31 makes that invisible.
+
+      Real theming lives in ui/theme/Theme.kt, driven by the user's saved settings. There is no
+      values-night copy: this style is identical in both, and a night variant would take precedence
+      over the v31 one and undo the splash work above.
     -->
     <style name="Theme.RephraseGenie" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/window_background</item>

@@ -120,10 +120,44 @@ slightly and shows `Nothing to rephrase`. (Windows fails silently here, which is
 
 Otherwise:
 
-1. The bubble turns into a spinner. The chip shows `Rephrasing…`, then `Checking result…`.
+1. A shimmer sweeps round the rim of the bubble and the sparkle breathes in the middle
+   (`GeneratingRing`). The chip shows `Rephrasing…`, then `Checking result…`.
 2. The text goes through the steps in §8.
-3. On success, the new text is written back with `ACTION_SET_TEXT`. The chip shows `Done ✓` and fades.
+3. On success, the new text is written back with `ACTION_SET_TEXT`. The chip shows `Done ✓` with an
+   **Undo**, and fades after eight seconds.
 4. On failure, the chip shows the error with a **Retry** button. The user's own text is left alone.
+
+The sparkle stays put while it works rather than being swapped for a spinner: it is the same bubble
+doing the same job, not a different control. The shimmer is built from the user's accent rather than
+a fixed palette, so it follows whichever of the eight accents they picked (§10).
+
+**User taps the bubble again while it is working** → the run is cancelled and the chip shows
+`Cancelled`. It deliberately does **not** start over: a run can be five of its six API calls in
+(§8.3), on the user's own OpenAI key, which is too much to charge someone for a fumbled tap. There
+is no double-tap gesture — a double tap is simply a start and then a cancel.
+
+**The status chip, when events pile up.** Four separate ways it used to get stuck or say the wrong
+thing, all fixed together:
+
+- Every message now goes through one `showStatus` helper that **cancels any pending auto-clear**
+  first. A clear scheduled by the previous message used to fire part-way through the next one and
+  wipe it, so progress text went missing when taps came in quick succession.
+- `hideBubble` clears the chip **before** its early-return guard. A result landing after the user
+  had moved on left a message stranded with no bubble to belong to, and the next hide returned
+  early without ever taking it down.
+- `setStatus` refuses to draw a chip when there is no bubble — it had nothing to anchor to and was
+  placed off the top-left corner of the screen.
+- The chip **follows the bubble** while it is dragged and while it snaps to the edge, and is
+  clamped to the screen. It used to be positioned once and left behind.
+
+**Writing back has three outcomes, not two.** Written, wrong app, and failed used to collapse into
+a boolean, so switching apps mid-rephrase printed `Copied — paste it in` over the top of the real
+reason — telling the user to paste something that had never been copied. Each outcome now says its
+own piece, and only a genuine `ACTION_SET_TEXT` failure reaches for the clipboard.
+
+> Cancelling has one trap in it. The coroutine's own `CancellationException` has to be caught above
+> the general `catch (e: Exception)` and rethrown, or every cancel reports itself to the user as
+> `The rephrase could not be generated.` and structured concurrency is quietly broken.
 
 **User long-presses the bubble** → the tone sheet opens. Tapping a tone **rephrases straight away with
 that tone**. This is on purpose different from Windows, where picking a tone only changes the default
@@ -570,6 +604,77 @@ Hot Pink `#F472B6`.
 Shapes: cards 10dp, buttons and inputs 6dp, tone chips 10dp. Body text 13sp, section titles 14sp
 semi-bold, hints 11sp muted. Dark is the default theme.
 
+**Icons.** Material outlined icons, from `material-icons-extended`. Every card heading carries one,
+tinted with the accent. Buttons take a leading icon where it adds meaning; back, settings, edit and
+delete are icon-only, and those always pass a content description, because with no label beside
+them the icon is all a screen reader has. Icons on card headings are decorative and pass none.
+
+**Motion.** Screens slide horizontally in the direction of travel: the new screen comes in from the
+right over 280ms while the one behind it drifts a quarter of the way left, reversed on back. The
+partial travel of the outgoing screen is what makes the two read as a stack rather than two
+unrelated pages swapping.
+
+**System bars.** The window is edge-to-edge, so the clock and the battery icon are drawn by the
+system on top of our background. `RephraseGenieTheme` sets `isAppearanceLightStatusBars` from the
+resolved theme, so they flip the moment the user changes Dark / Light / System. Without it they
+stay dark on the dark theme and cannot be read.
+
+**Insets and the app bar.** Every screen sits in `AppScaffold`, which owns the window insets so
+nothing ever draws under the status bar or a camera cut-out. Its title bar collapses on scroll and
+comes straight back on scroll up — the Compose equivalent of a CoordinatorLayout with
+`scroll|enterAlways`. A screen whose own header has to stay put, such as the blocked-apps search,
+pins the bar instead.
+
+**Launch.** An intro video, not a static splash. It lives at `app/src/main/res/raw/splash_video.mp4`
+— `raw`, not `drawable`, because the platform will not play a video from `drawable`, and not a GIF
+because Android has no built-in GIF decoder for views. It plays once and the app moves on when the
+player reports completion. The splash also ends on a timeout, set from the real duration once the
+video is prepared and capped at 12s, and on a decode error — a file that will not play on some
+device must never strand the user on the intro. To replace it, drop a new mp4 in at the same path.
+There are two things in front of it that cannot simply be deleted, so both are made invisible
+instead. The `windowBackground` in `themes.xml` is the launch window between the process starting
+and Compose drawing — removing it would put a white flash in front of the video, so it is set to
+the same dark as the video. On Android 12 and up the system draws its own splash on top of that,
+with the app icon, and there is no way to switch it off or shorten it; `values-v31/themes.xml`
+gives it the same background, a transparent icon and no icon backdrop, so launch reads as the video
+starting rather than an icon flashing and being replaced. There is deliberately no `values-night`
+copy of the style: it is identical in both configs, and a night variant would take precedence over
+the v31 one and undo this.
+
+**Fitting the clip to the screen.** VideoView only ever letterboxes, so the splash uses MediaPlayer
+and a TextureView, which can take a transform. `VideoFit` in `SplashScreen.kt` then chooses between
+showing the whole frame and filling the screen, and which is right depends entirely on the clip.
+The first video was 16:9: filling a 9:19.5 phone with it cropped about three quarters of the frame
+width away and cut the text in the video in half, so it had to fit, in a band with dark above and
+below. The current video is 9:16 and loses roughly 6% off each side to fill the screen, which its
+margins absorb — so it crops, because black bars on a launch screen look like something failed to
+load. If the video is replaced again, check this rather than assuming.
+
+**The system bar icons over the video.** The intro is near-white while the app is dark-themed, so
+the white clock and battery icons disappeared into it. `RephraseGenieTheme` takes a `lightBackdrop`
+flag for exactly this case, and MainActivity passes it while the splash is up.
+
+> Do not try hiding the system bars for the splash instead. It was tried: hiding them relayouts the
+> window, which destroys the TextureView's SurfaceTexture, and the video then never renders at all
+> — a blank dark screen for the full duration, with the bars still showing anyway.
+
+**The dark couple of seconds at launch is cold start, not the video.** Measured on an x86 emulator,
+debug build: 1.63-1.66s from process start to the first app frame (`Displayed +1s6xxms`, steady
+over repeated runs), then about 290ms more before the first video frame
+(`MEDIA_INFO_VIDEO_RENDERING_START`). So roughly 85% of it is class loading and JIT before anything
+can be drawn at all. The splash does what it can about its own share: the player is handed the file
+and told to prepare during composition rather than waiting for a surface to exist, and the view is
+held at zero alpha until the first frame is reported, so the handover is a fade and not a black
+flash. The rest needs a release build and a real device to judge — and if it still reads as a wait,
+the only thing that fills it is an image on `windowBackground`, since that is the one thing drawn
+before the app has a frame.
+
+**Why mp4 and not GIF.** GIF caps at 256 colours and has no inter-frame compression, so the same
+five seconds runs many times the size and looks banded; Android has no built-in GIF decoder for
+views either, so it would mean pulling in Coil or Glide for one screen. H.264 in an mp4 is
+hardware-decoded and cost 1 MB here. If a looping image is ever wanted instead of a player,
+animated WebP is the format to reach for — it is natively supported from API 28.
+
 ---
 
 ## 11. Screens
@@ -599,12 +704,14 @@ but the bubble will not work until both are on.
 
 ### Home
 
-- A card showing whether the bubble is running, with a switch
+- A card showing whether the bubble is running, with a switch to show or hide it. The switch only
+  appears once both permissions are granted — before that the card shows how to grant them.
 - A warning with a fix button if a permission was turned off
-- **A text box for trying it inside the app** — type, pick a tone, see the result. This is how the
-  feature gets tested without leaving the app.
-- Recent rephrases
 - A settings button
+
+Nothing else. There is no in-app text box and no list of past rephrases: the bubble is the product,
+and a second copy of it inside the app is another thing to keep working that nobody uses once the
+overlay is running.
 
 ### Settings
 
@@ -709,7 +816,7 @@ Manifest additions:
 ### Step 3 — Rephrasing works ✅ tested on device
 - [x] The steps in §8, with one retry and nothing written on failure
 - [x] Setup screen
-- [x] Home screen with the in-app text box
+- [x] Home screen with the bubble card and its on/off switch
 - [ ] **Compare results with the Windows app** using the same text and tone
 
 ### Step 4 — The overlay (the main goal) ✅ built, device testing outstanding
@@ -726,10 +833,10 @@ Manifest additions:
 - [x] Settings screen — all five cards, saving as each change is made
 - [x] Blocked apps card and the installed-app picker
 - [x] Tone Builder with cleaning, colour rules and live test
-- [x] Recent rephrases on the Home screen
 - [x] Empty, loading and error states on every new screen
 - [x] Check no logs contain the key or any user text
-- [ ] Release build
+- [ ] **Release build type** — see "What still needs doing" #4. Agreed to do this later, but it is
+      blocking a real cold-start number, so it should not slip much further.
 
 ---
 
@@ -747,8 +854,8 @@ build — see "What still needs doing" below.
 domain/     model (10)  prompt (3)  guardrail (1)  repository (1)  usecase (6)
 data/       local: apps, datastore, db (3), secure, tone   remote (3)   repository (6)   mapper
 overlay/    RephraseAccessibilityService, BubbleOverlay, AccessibilityStatus, FocusedField
-ui/         theme (3)  components (3)  navigation
-            screen: setup (2), home (4), settings (4), tonebuilder (2)
+ui/         theme (3)  components (4)  navigation
+            screen: setup (2), home (3), settings (4), tonebuilder (2), splash (1)
 di/         AppModule, DatabaseModule, NetworkModule, RepositoryModule
 assets/tones/  the 8 built-in tone .md files
 ```
@@ -760,7 +867,13 @@ assets/tones/  the 8 built-in tone .md files
 | 1 | **Device testing of everything in Step 5** | Settings, the blocked-apps picker, the Tone Builder and the tone sheet have all been built and compile, but none has been tapped on a phone. |
 | 2 | **Test the bubble on real apps** | WhatsApp, Gmail, Chrome, Instagram, Slack. Especially write-back in WebView-based apps, where the node goes stale. |
 | 3 | **Compare results with the Windows app** | Same text, same tone, side by side. Until this is done, §8 is implemented but unverified. |
-| 4 | **Release build** | Plus a real application ID (§14) and the Play listing wording. |
+| 4 | **Release build type** | Not written yet. `app/build.gradle.kts` has a `release` block, but it only carries `optimization { enable = false }` — R8 off, no `signingConfig`, no ProGuard rules file. As it stands `assembleRelease` produces an unsigned APK that cannot be installed, so there is no way to measure the app as users will get it. Also needs a real application ID (§14) and the Play listing wording. |
+
+**Why #4 matters sooner than it looks.** Cold start is currently 1.63-1.66s on a debug build on an
+x86 emulator, which is what puts the dark couple of seconds in front of the intro video (§10). That
+number is not the one users will see — R8, AOT compilation and a real device all cut it — but until
+there is an installable release build, nobody can say by how much, and it is not worth tuning
+startup against a figure that is mostly debug-build overhead.
 
 ### Decisions taken while finishing Step 5
 
@@ -775,6 +888,15 @@ assets/tones/  the 8 built-in tone .md files
 - **The dragged position survives losing focus.** §4.2 says the position is remembered; putting the
   bubble back beside the next field would undo the drag every time the user changed field. It is
   remembered for as long as the service runs, not across reboots.
+- **Icons, transitions, insets, system bars and the intro video.** All added after the first pass,
+  on request — see §10. The icons are deliberately plain Material outlined ones rather than a
+  custom set: a settings gear and a back arrow need no learning.
+- **The Home screen is only a status page.** The in-app text box and the list of past rephrases
+  were both dropped: the bubble is the product, and a second copy of it inside the app is another
+  thing to keep working that nobody uses once the overlay runs. Home now shows whether the bubble
+  is running, a switch to show or hide it once both permissions are granted, and the way to grant
+  them if they are missing. Runs are still recorded — `HistoryRepository.observeRecent` is now
+  unread, kept because the generations table is part of §6 and §7.
 - **Undo, not "use as input", in the overlay.** After a successful write-back the chip offers Undo
   for eight seconds, which puts the user's own draft back. "Use as input" needs nothing: the field
   now holds the result, so tapping the bubble again rephrases it.

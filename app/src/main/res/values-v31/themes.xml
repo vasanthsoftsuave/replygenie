@@ -1,0 +1,19 @@
+<resources>
+    <!--
+      Android 12 and up draw their own splash before the app gets a frame, and there is no way to
+      switch it off or shorten it. So it is made invisible instead: the same background as the
+      launch window, no icon, no icon backdrop. The first thing the user actually sees is the intro
+      video in ui/screen/splash.
+
+      Real theming lives in ui/theme/Theme.kt, driven by the user's saved settings.
+    -->
+    <style name="Theme.RephraseGenie" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/window_background</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+
+        <item name="android:windowSplashScreenBackground">@color/window_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_transparent</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@android:color/transparent</item>
+    </style>
+</resources>

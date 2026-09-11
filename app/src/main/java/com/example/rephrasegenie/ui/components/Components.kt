@@ -10,15 +10,20 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -26,7 +31,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -52,14 +60,34 @@ fun SectionCard(
     )
 }
 
+/** A card heading, with an optional icon that says at a glance what the card is for. */
 @Composable
-fun SectionTitle(text: String, modifier: Modifier = Modifier) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.titleMedium,
-        color = AppTheme.colors.textPrimary,
+fun SectionTitle(
+    text: String,
+    modifier: Modifier = Modifier,
+    icon: ImageVector? = null,
+) {
+    val colors = AppTheme.colors
+    Row(
         modifier = modifier,
-    )
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        if (icon != null) {
+            Icon(
+                imageVector = icon,
+                // Decorative: the heading beside it already says what this is.
+                contentDescription = null,
+                tint = colors.accent,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        Text(
+            text = text,
+            style = MaterialTheme.typography.titleMedium,
+            color = colors.textPrimary,
+        )
+    }
 }
 
 @Composable
@@ -92,6 +120,7 @@ fun AppTextField(
     minLines: Int = 1,
     isPassword: Boolean = false,
     enabled: Boolean = true,
+    leadingIcon: ImageVector? = null,
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
 ) {
     val colors = AppTheme.colors
@@ -105,6 +134,16 @@ fun AppTextField(
         textStyle = MaterialTheme.typography.bodyMedium,
         placeholder = placeholder?.let {
             { Text(it, style = MaterialTheme.typography.bodyMedium, color = colors.textMuted) }
+        },
+        leadingIcon = leadingIcon?.let {
+            {
+                Icon(
+                    imageVector = it,
+                    contentDescription = null,
+                    tint = colors.textMuted,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
         },
         visualTransformation = if (isPassword) {
             PasswordVisualTransformation()
@@ -133,6 +172,7 @@ fun PrimaryButton(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     loading: Boolean = false,
+    icon: ImageVector? = null,
 ) {
     val colors = AppTheme.colors
     Button(
@@ -158,7 +198,7 @@ fun PrimaryButton(
                 color = colors.onAccent,
             )
         } else {
-            Text(text, style = MaterialTheme.typography.titleSmall)
+            ButtonLabel(text = text, icon = icon, style = MaterialTheme.typography.titleSmall)
         }
     }
 }
@@ -170,6 +210,7 @@ fun SecondaryButton(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     loading: Boolean = false,
+    icon: ImageVector? = null,
 ) {
     val colors = AppTheme.colors
     Button(
@@ -196,8 +237,39 @@ fun SecondaryButton(
                 color = colors.textSecondary,
             )
         } else {
-            Text(text, style = MaterialTheme.typography.bodySmall)
+            ButtonLabel(text = text, icon = icon, style = MaterialTheme.typography.bodySmall)
         }
+    }
+}
+
+/**
+ * Icon-only, for actions whose icon is unambiguous — back, settings, close.
+ *
+ * [contentDescription] is required rather than optional: with no label beside it, the icon is the
+ * only thing a screen reader has to go on.
+ */
+@Composable
+fun IconActionButton(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    tint: Color? = null,
+) {
+    val colors = AppTheme.colors
+    Box(
+        modifier = modifier
+            .size(40.dp)
+            .clip(CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = tint ?: colors.textSecondary,
+            modifier = Modifier.size(22.dp),
+        )
     }
 }
 
@@ -259,7 +331,25 @@ fun ErrorCard(
             color = colors.danger,
         )
         if (onRetry != null) {
-            SecondaryButton(text = "Retry", onClick = onRetry)
+            SecondaryButton(text = "Retry", onClick = onRetry, icon = Icons.Filled.Refresh)
         }
     }
+}
+
+/** Shared by the buttons above so a label with an icon lines up the same way everywhere. */
+@Composable
+private fun ButtonLabel(
+    text: String,
+    icon: ImageVector?,
+    style: TextStyle,
+) {
+    if (icon != null) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+        )
+        Spacer(Modifier.width(6.dp))
+    }
+    Text(text, style = style)
 }

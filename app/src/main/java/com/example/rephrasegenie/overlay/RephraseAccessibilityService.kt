@@ -17,6 +17,7 @@ import com.example.rephrasegenie.domain.repository.ToneRepository
 import com.example.rephrasegenie.domain.usecase.RephraseStage
 import com.example.rephrasegenie.domain.usecase.RephraseTextUseCase
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -26,6 +27,17 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
+
+/** What became of an attempt to put text back into the field. */
+private enum class WriteResult {
+    WRITTEN,
+
+    /** The user moved to another app while the AI was working, so nothing was written (§4.3). */
+    WRONG_APP,
+
+    /** The field is gone, or the app blocks ACTION_SET_TEXT. */
+    FAILED,
+}
 
 /**
  * The core of the app: watches for the user focusing a text field in any app, shows the bubble
@@ -140,6 +152,12 @@ class RephraseAccessibilityService : AccessibilityService() {
      * it, and putting it back beside the next field would undo that every time they change field.
      */
     private fun hideBubble(reason: String = "unspecified") {
+        // Cleared before the guard below, not after it. A result that lands once the user has
+        // already moved on would otherwise leave its message stranded on screen with no bubble to
+        // belong to, and the next hide would return early without ever taking it down.
+        handler.removeCallbacks(clearStatus)
+        overlay?.setStatus(null)
+
         if (currentField == null && pendingShow == null) return
         Log.d(TAG, "Hiding bubble: $reason")
         pendingShow?.let(handler::removeCallbacks)
@@ -157,6 +175,14 @@ class RephraseAccessibilityService : AccessibilityService() {
     // -- actions -----------------------------------------------------------------------------
 
     private fun onBubbleTapped() {
+        // A second tap while a rephrase is in flight aborts it. Starting over instead would throw
+        // away a run that may be five of its six API calls in (§8.3), on the user's own OpenAI
+        // key — too much to charge someone for a fumbled tap.
+        if (rephraseJob?.isActive == true) {
+            cancelRephrase()
+            return
+        }
+
         scope.launch {
             val tone = resolveTone()
             if (tone == null) {
@@ -181,6 +207,13 @@ class RephraseAccessibilityService : AccessibilityService() {
         return all.firstOrNull { it.id == defaultId }
             ?: all.maxByOrNull { it.usageCount }
             ?: all.first()
+    }
+
+    private fun cancelRephrase() {
+        rephraseJob?.cancel()
+        rephraseJob = null
+        overlay?.setWorking(false)
+        flash("Cancelled")
     }
 
     private fun onBubbleLongPressed() {
@@ -216,7 +249,7 @@ class RephraseAccessibilityService : AccessibilityService() {
             overlay?.setWorking(true)
             try {
                 val result = rephraseText(tone, draft) { stage ->
-                    overlay?.setStatus(
+                    showStatus(
                         when (stage) {
                             RephraseStage.REPHRASING -> "Rephrasing…"
                             RephraseStage.CHECKING -> "Checking result…"
@@ -225,33 +258,53 @@ class RephraseAccessibilityService : AccessibilityService() {
                 }
 
                 lastUsedTone = tone
-                val written = writeBack(field, result.text)
                 overlay?.setWorking(false)
 
-                if (written) {
-                    // A rephrase is never a one-way door: the draft the user actually wrote is
-                    // one tap away until the chip goes.
-                    overlay?.setStatus(
-                        text = "Done ✓",
-                        actions = listOf(BubbleAction("Undo") { undo(field, draft) }),
-                    )
-                    clearStatusAfter(ACTION_MESSAGE_MS)
-                } else {
-                    copyToClipboard(result.text)
-                    overlay?.setStatus("Copied — paste it in")
-                    clearStatusAfter(MESSAGE_MS)
+                // Each outcome says its own piece. They used to share one branch, so switching
+                // apps mid-rephrase reported "Copied — paste it in" over the top of the real
+                // reason, and the user was told to paste something that was never copied.
+                when (writeBack(field, result.text)) {
+                    WriteResult.WRITTEN -> {
+                        // A rephrase is never a one-way door: the draft the user actually wrote
+                        // is one tap away until the chip goes.
+                        showStatus(
+                            text = "Done ✓",
+                            actions = listOf(BubbleAction("Undo") { undo(field, draft) }),
+                        )
+                        clearStatusAfter(ACTION_MESSAGE_MS)
+                    }
+
+                    WriteResult.WRONG_APP -> {
+                        showStatus(
+                            "You switched apps before the rephrase finished.",
+                            isError = true,
+                        )
+                        clearStatusAfter(MESSAGE_MS)
+                    }
+
+                    WriteResult.FAILED -> {
+                        // Some apps block ACTION_SET_TEXT. The clipboard is the way out (§4.3).
+                        copyToClipboard(result.text)
+                        showStatus("Copied — paste it in")
+                        clearStatusAfter(MESSAGE_MS)
+                    }
                 }
             } catch (e: RephraseError) {
                 overlay?.setWorking(false)
-                overlay?.setStatus(
+                showStatus(
                     text = e.userMessage,
                     isError = true,
                     actions = listOf(BubbleAction("Retry") { scope.launch { rephraseWith(tone) } }),
                 )
                 clearStatusAfter(ACTION_MESSAGE_MS)
+            } catch (e: CancellationException) {
+                // Cancelling is the user getting what they asked for, not a failure. It has to be
+                // caught above the generic handler, or a cancelled run reports itself as broken —
+                // and rethrowing is what keeps structured concurrency intact.
+                throw e
             } catch (e: Exception) {
                 overlay?.setWorking(false)
-                overlay?.setStatus("The rephrase could not be generated.", isError = true)
+                showStatus("The rephrase could not be generated.", isError = true)
                 clearStatusAfter(MESSAGE_MS)
             }
         }
@@ -260,19 +313,34 @@ class RephraseAccessibilityService : AccessibilityService() {
     /** Puts the draft the user wrote back into the field. */
     private fun undo(field: FocusedField, originalText: String) {
         scope.launch {
-            val restored = writeBack(field, originalText)
-            if (restored) {
-                overlay?.setStatus("Your text is back")
+            if (writeBack(field, originalText) == WriteResult.WRITTEN) {
+                showStatus("Your text is back")
             } else {
-                overlay?.setStatus("Could not undo — the field has moved on.", isError = true)
+                showStatus("Could not undo — the field has moved on.", isError = true)
             }
             clearStatusAfter(MESSAGE_MS)
         }
     }
 
+    /**
+     * Puts a message on the chip and drops any auto-clear left over from an earlier one.
+     *
+     * Without that second part a clear scheduled by the previous message fires part-way through
+     * this one and wipes it, which is how progress text went missing when events arrived in quick
+     * succession.
+     */
+    private fun showStatus(
+        text: String,
+        isError: Boolean = false,
+        actions: List<BubbleAction> = emptyList(),
+    ) {
+        handler.removeCallbacks(clearStatus)
+        overlay?.setStatus(text, isError, actions)
+    }
+
     /** A message with no action, cleared on its own. */
     private fun flash(text: String, isError: Boolean = false) {
-        overlay?.setStatus(text, isError = isError)
+        showStatus(text, isError = isError)
         clearStatusAfter(MESSAGE_MS)
     }
 
@@ -290,18 +358,12 @@ class RephraseAccessibilityService : AccessibilityService() {
      * the bubble appeared can be stale by now, especially in apps built on WebView; and refuse to
      * write if the user switched apps while the AI was working.
      */
-    private suspend fun writeBack(field: FocusedField, text: String): Boolean =
+    private suspend fun writeBack(field: FocusedField, text: String): WriteResult =
         withContext(Dispatchers.Main) {
-            val live = findEditableNode() ?: return@withContext false
+            val live = findEditableNode() ?: return@withContext WriteResult.FAILED
 
             val livePackage = live.packageName?.toString().orEmpty()
-            if (livePackage != field.packageName) {
-                overlay?.setStatus(
-                    "You switched apps before the rephrase finished.",
-                    isError = true,
-                )
-                return@withContext false
-            }
+            if (livePackage != field.packageName) return@withContext WriteResult.WRONG_APP
 
             val args = Bundle().apply {
                 putCharSequence(
@@ -309,7 +371,12 @@ class RephraseAccessibilityService : AccessibilityService() {
                     text,
                 )
             }
-            live.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+
+            if (live.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
+                WriteResult.WRITTEN
+            } else {
+                WriteResult.FAILED
+            }
         }
 
     private fun copyToClipboard(text: String) {

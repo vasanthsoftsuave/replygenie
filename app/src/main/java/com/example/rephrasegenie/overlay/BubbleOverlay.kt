@@ -13,10 +13,10 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import com.example.rephrasegenie.domain.model.Tone
@@ -67,6 +67,7 @@ class BubbleOverlay(
     private var manualPosition: Pair<Int, Int>? = null
 
     private var snapAnimator: ValueAnimator? = null
+    private var glyphPulse: ValueAnimator? = null
 
     private var accentColor: Int = Color.parseColor("#8AB4FF")
     private var isDark: Boolean = true
@@ -75,6 +76,7 @@ class BubbleOverlay(
         accentColor = accent
         isDark = dark
         bubbleView?.let { applyBubbleStyle(it) }
+        bubbleView?.findViewWithTag<GeneratingRing>(TAG_RING)?.setAccent(accent)
     }
 
     fun showNear(bounds: Rect) {
@@ -104,12 +106,50 @@ class BubbleOverlay(
         setStatus(null)
     }
 
+    /**
+     * Shows that a rephrase is running: a shimmer sweeping round the rim and the sparkle breathing
+     * in the middle. The sparkle deliberately stays put rather than being swapped for a spinner —
+     * it is the same bubble doing the same job, not a different control.
+     */
     fun setWorking(working: Boolean) {
         val view = bubbleView ?: return
-        val spinner = view.findViewWithTag<ProgressBar>(TAG_SPINNER)
+        val ring = view.findViewWithTag<GeneratingRing>(TAG_RING)
         val glyph = view.findViewWithTag<TextView>(TAG_GLYPH)
-        spinner?.visibility = if (working) View.VISIBLE else View.GONE
-        glyph?.visibility = if (working) View.GONE else View.VISIBLE
+
+        if (working) {
+            ring?.visibility = View.VISIBLE
+            ring?.start()
+            glyph?.let(::startGlyphPulse)
+        } else {
+            ring?.stop()
+            ring?.visibility = View.GONE
+            stopGlyphPulse(glyph)
+        }
+    }
+
+    private fun startGlyphPulse(glyph: View) {
+        if (glyphPulse?.isRunning == true) return
+        glyphPulse = ValueAnimator.ofFloat(1f, 0.72f).apply {
+            duration = PULSE_MS
+            repeatCount = ValueAnimator.INFINITE
+            repeatMode = ValueAnimator.REVERSE
+            interpolator = AccelerateDecelerateInterpolator()
+            addUpdateListener { animation ->
+                val scale = animation.animatedValue as Float
+                glyph.scaleX = scale
+                glyph.scaleY = scale
+                glyph.alpha = scale
+            }
+            start()
+        }
+    }
+
+    private fun stopGlyphPulse(glyph: View?) {
+        glyphPulse?.cancel()
+        glyphPulse = null
+        glyph?.scaleX = 1f
+        glyph?.scaleY = 1f
+        glyph?.alpha = 1f
     }
 
     /**
@@ -126,6 +166,11 @@ class BubbleOverlay(
     ) {
         removeStatusView()
         if (text == null) return
+
+        // A chip with no bubble beside it has nothing to point at, and would be placed off the
+        // top-left corner of the screen. This happens when a result arrives after focus has
+        // already moved on, and the message is not worth showing by then anyway.
+        if (bubbleView == null) return
 
         val container = LinearLayout(service).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -166,14 +211,29 @@ class BubbleOverlay(
             )
         }
 
-        val bubbleParams = bubbleView?.layoutParams as? WindowManager.LayoutParams
-        val params = statusParams(touchable = actions.isNotEmpty()).apply {
-            x = bubbleParams?.x ?: 0
-            y = (bubbleParams?.y ?: 0) - dp(40)
-        }
-
-        addViewLogged(container, params)
+        addViewLogged(container, statusParams(touchable = actions.isNotEmpty()))
         statusView = container
+
+        // Placed once now and again after layout: the chip wraps its text, so its width — which
+        // decides whether it fits on screen — is not known until it has been measured.
+        repositionStatus()
+        container.post { repositionStatus() }
+    }
+
+    /** Keeps the chip beside the bubble, on screen, wherever the bubble has got to. */
+    private fun repositionStatus() {
+        val chip = statusView ?: return
+        val bubbleParams = bubbleView?.layoutParams as? WindowManager.LayoutParams ?: return
+        val params = chip.layoutParams as? WindowManager.LayoutParams ?: return
+
+        val metrics = service.resources.displayMetrics
+        val maxX = (metrics.widthPixels - chip.width).coerceAtLeast(0)
+        params.x = bubbleParams.x.coerceIn(0, maxX)
+        params.y = (bubbleParams.y - dp(40)).coerceAtLeast(0)
+
+        if (chip.isAttachedToWindow) {
+            runCatching { windowManager.updateViewLayout(chip, params) }
+        }
     }
 
     // The scrim is a bare catcher with no click semantics of its own: any touch dismisses the
@@ -339,15 +399,18 @@ class BubbleOverlay(
             )
         }
 
-        val spinner = ProgressBar(service).apply {
-            tag = TAG_SPINNER
+        val ring = GeneratingRing(service).apply {
+            tag = TAG_RING
             visibility = View.GONE
-            isIndeterminate = true
-            layoutParams = FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER)
+            setAccent(accentColor)
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+            )
         }
 
         frame.addView(glyph)
-        frame.addView(spinner)
+        frame.addView(ring)
         applyBubbleStyle(frame)
         attachGestures(frame)
         return frame
@@ -406,6 +469,7 @@ class BubbleOverlay(
                         params.x = startX + dx.roundToInt()
                         params.y = startY + dy.roundToInt()
                         runCatching { windowManager.updateViewLayout(v, params) }
+                        repositionStatus()
                     }
                     true
                 }
@@ -452,6 +516,7 @@ class BubbleOverlay(
                 if (!view.isAttachedToWindow) return@addUpdateListener
                 params.x = animator.animatedValue as Int
                 runCatching { windowManager.updateViewLayout(view, params) }
+                repositionStatus()
             }
             start()
         }
@@ -483,9 +548,10 @@ class BubbleOverlay(
     private companion object {
         const val TAG = "BubbleOverlay"
         const val TAG_GLYPH = "glyph"
-        const val TAG_SPINNER = "spinner"
+        const val TAG_RING = "ring"
         const val LONG_PRESS_MS = 400L
         const val MAX_SHEET_TONES = 20
         const val SNAP_MS = 180L
+        const val PULSE_MS = 620L
     }
 }
