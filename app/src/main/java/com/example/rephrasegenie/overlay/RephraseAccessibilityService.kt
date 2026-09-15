@@ -2,7 +2,6 @@ package com.example.rephrasegenie.overlay
 
 import android.accessibilityservice.AccessibilityService
 import android.content.res.Configuration
-import android.graphics.Rect
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -14,7 +13,6 @@ import com.example.rephrasegenie.domain.model.ThemeMode
 import com.example.rephrasegenie.domain.model.Tone
 import com.example.rephrasegenie.domain.repository.SettingsRepository
 import com.example.rephrasegenie.domain.repository.ToneRepository
-import com.example.rephrasegenie.domain.usecase.RephraseStage
 import com.example.rephrasegenie.domain.usecase.RephraseTextUseCase
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CancellationException
@@ -40,8 +38,8 @@ private enum class WriteResult {
 }
 
 /**
- * The core of the app: watches for the user focusing a text field in any app, shows the bubble
- * next to it, and on tap rephrases what they typed and writes it back.
+ * The core of the app: keeps the bubble on screen while the switch is on, and on tap rephrases
+ * whatever the user has typed in the field they are in and writes it back.
  */
 @AndroidEntryPoint
 class RephraseAccessibilityService : AccessibilityService() {
@@ -54,14 +52,10 @@ class RephraseAccessibilityService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
 
     private var overlay: BubbleOverlay? = null
-    private var currentField: FocusedField? = null
     private var rephraseJob: Job? = null
 
-    /** Debounces focus events. Windows has none and the bubble would flicker on a phone. */
-    private var pendingShow: Runnable? = null
-
-    /** The tone the last rephrase used, so a second tap repeats it without another choice. */
-    private var lastUsedTone: Tone? = null
+    /** The app in front, so the bubble can step aside in apps on the blocked list. */
+    private var foregroundPackage: String? = null
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -71,98 +65,58 @@ class RephraseAccessibilityService : AccessibilityService() {
             onLongPress = ::onBubbleLongPressed,
             onToneChosen = ::onToneChosen,
         )
-        applyAppearance()
+        observeSettings()
         Log.i(TAG, "Service connected.")
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        event ?: return
-
-        when (event.eventType) {
-            AccessibilityEvent.TYPE_VIEW_FOCUSED,
-            AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED,
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
-            -> handleFocus(event)
-
-            // Every other event type is none of our business. The service asks for as little as
-            // it can get away with, which is what Play review looks for.
-            else -> Unit
-        }
-    }
-
     /**
-     * Decides whether the bubble should be showing, and where.
+     * The only thing an event decides now is whether the app in front is on the blocked list.
      *
-     * A window change is handled the same way as a focus change: re-check whether there is still
-     * an editable field. Hiding blindly on a window change made the bubble flicker away as soon as
-     * a search screen or dialog opened.
+     * The bubble used to chase the focused field, which meant handling a focus and a
+     * text-selection event for every keystroke the user typed in any app, each one walking the
+     * node tree to re-read the field's bounds. It is on screen from the moment the switch goes on
+     * instead, so those event types are no longer requested at all (see
+     * accessibility_service_config.xml) and the field is read once, at the moment of the tap.
      */
-    private fun handleFocus(event: AccessibilityEvent) {
-        val packageName = event.packageName?.toString().orEmpty()
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        val packageName = event?.packageName?.toString().orEmpty()
+        if (packageName.isEmpty()) return
 
-        // Ignore, never hide, for events we cause ourselves.
-        //
-        // The bubble is our own window, so adding it fires a window event from our own package.
-        // Treating that as "the user left the app" made the bubble hide itself the instant it
-        // appeared. The keyboard opening is the same story: its events arrive while the focused
-        // node is briefly not the text field.
+        // Our own windows are not "the app in front": adding the bubble fires an event from our
+        // own package, and treating that as an app change would have it react to itself. The
+        // keyboard is skipped for the same reason — it opens on top of the app underneath, which
+        // is the one that counts.
         if (packageName == applicationContext.packageName) return
         if (isInputMethod(packageName)) return
 
-        // 1. Is the bubble switched on?
-        if (!settings.settings.value.bubbleEnabled) return hideBubble("bubble off")
-
-        // 2. Is this app on the blocked list? Read from memory, never from disk.
-        if (packageName.isEmpty() || settings.isAppBlocked(packageName)) return hideBubble("blocked app")
-
-        val node = findEditableNode()
-        if (node == null) {
-            // Focus reads as empty for a moment whenever the keyboard opens or the screen
-            // re-lays-out. Only give up if the user has actually left the app we are showing
-            // the bubble for, otherwise it disappears the instant it appears.
-            if (currentField != null && currentField?.packageName != packageName) hideBubble("left app")
-            return
-        }
-
-        val bounds = Rect().also { node.getBoundsInScreen(it) }
-        if (bounds.width() < MIN_FIELD_PX || bounds.height() < MIN_FIELD_PX) return hideBubble("field too small")
-
-        val field = FocusedField(packageName, bounds)
-        if (field == currentField) return
-
-        Log.d(TAG, "Field focused in $packageName at $bounds")
-        currentField = field
-        scheduleShow(field)
+        if (packageName == foregroundPackage) return
+        foregroundPackage = packageName
+        syncBubble()
     }
 
-    private fun scheduleShow(field: FocusedField) {
-        pendingShow?.let(handler::removeCallbacks)
-        val runnable = Runnable {
-            Log.d(TAG, "Showing bubble near ${field.bounds}")
-            overlay?.showNear(field.bounds)
+    /** The bubble is up whenever the switch is on and the app in front is not blocked. */
+    private fun syncBubble() {
+        val enabled = settings.settings.value.bubbleEnabled
+        // Read from memory, never from disk: this runs on every app change.
+        val blocked = foregroundPackage?.let(settings::isAppBlocked) == true
+
+        if (enabled && !blocked) {
+            overlay?.show()
+        } else {
+            hideBubble(if (!enabled) "switch off" else "blocked app")
         }
-        pendingShow = runnable
-        handler.postDelayed(runnable, FOCUS_DEBOUNCE_MS)
     }
 
     /**
      * Takes the bubble down.
      *
      * The dragged position deliberately survives this: the user moved the bubble where they wanted
-     * it, and putting it back beside the next field would undo that every time they change field.
+     * it, and starting it back at the default every time they pass through a blocked app would
+     * undo that for them.
      */
     private fun hideBubble(reason: String = "unspecified") {
-        // Cleared before the guard below, not after it. A result that lands once the user has
-        // already moved on would otherwise leave its message stranded on screen with no bubble to
-        // belong to, and the next hide would return early without ever taking it down.
         handler.removeCallbacks(clearStatus)
-        overlay?.setStatus(null)
-
-        if (currentField == null && pendingShow == null) return
         Log.d(TAG, "Hiding bubble: $reason")
-        pendingShow?.let(handler::removeCallbacks)
-        pendingShow = null
-        currentField = null
         overlay?.hide()
     }
 
@@ -194,26 +148,21 @@ class RephraseAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * The tone a plain tap uses: whatever was used last, then the default from Settings, then the
-     * most-used tone. A tap should never open a menu — that is what the long-press is for.
+     * The tone a plain tap uses: the one picked in the sheet, then the most-used. A tap never
+     * opens a menu — that is what the long-press is for.
      */
-    private suspend fun resolveTone(): Tone? {
-        lastUsedTone?.let { return it }
+    private suspend fun resolveTone(): Tone? = pickTone(tones.observeTones().first())
 
-        val all = tones.observeTones().first()
+    private fun pickTone(all: List<Tone>): Tone? {
         if (all.isEmpty()) return null
-
-        val defaultId = settings.settings.value.defaultToneId
-        return all.firstOrNull { it.id == defaultId }
-            ?: all.maxByOrNull { it.usageCount }
-            ?: all.first()
+        val selectedId = settings.settings.value.defaultToneId
+        return all.firstOrNull { it.id == selectedId } ?: all.maxByOrNull { it.usageCount }
     }
 
     private fun cancelRephrase() {
         rephraseJob?.cancel()
         rephraseJob = null
         overlay?.setWorking(false)
-        flash("Cancelled")
     }
 
     private fun onBubbleLongPressed() {
@@ -221,82 +170,82 @@ class RephraseAccessibilityService : AccessibilityService() {
             val all = tones.observeTones().first()
             if (all.isEmpty()) {
                 flash("No tones available", isError = true)
-            } else {
-                overlay?.showToneSheet(all)
+                return@launch
             }
+            overlay?.showToneSheet(all, selectedToneId = pickTone(all)?.id)
         }
     }
 
+    /**
+     * Picking a tone only picks it.
+     *
+     * It used to start a rephrase on the spot, which left no way to change tone without spending
+     * an API call on the user's own key to do it. The choice is stored, so it is still there after
+     * the service restarts, and the tick in the sheet reads back from the same place.
+     */
     private fun onToneChosen(tone: Tone) {
         overlay?.hideSheet()
-        lastUsedTone = tone
-        scope.launch { rephraseWith(tone) }
+        scope.launch { settings.update { it.copy(defaultToneId = tone.id) } }
     }
 
+    /**
+     * Nothing is said while this runs. The ring sweeping round the bubble is the progress report,
+     * and a chip that appeared, changed its wording twice and vanished again was one more thing
+     * moving on screen at the moment the user is waiting to read the result.
+     */
     private fun rephraseWith(tone: Tone) {
-        val field = currentField ?: return
+        // Read now rather than tracked as focus moves: the bubble no longer follows the field, so
+        // the field is whatever the user is in at the moment they tap.
         val node = findEditableNode()
-        val draft = node?.text?.toString().orEmpty()
+        if (node == null) {
+            flash("Tap a text field first")
+            return
+        }
 
+        val draft = node.text?.toString().orEmpty()
         // Windows fails silently here, which leaves the user tapping a bubble that does nothing.
         if (draft.isBlank()) {
             flash("Nothing to rephrase")
             return
         }
 
+        val targetPackage = node.packageName?.toString().orEmpty()
+
         rephraseJob?.cancel()
         rephraseJob = scope.launch {
             overlay?.setWorking(true)
             try {
-                val result = rephraseText(tone, draft) { stage ->
-                    showStatus(
-                        when (stage) {
-                            RephraseStage.REPHRASING -> "Rephrasing…"
-                            RephraseStage.CHECKING -> "Checking result…"
-                        }
-                    )
-                }
-
-                lastUsedTone = tone
+                val result = rephraseText(tone, draft)
                 overlay?.setWorking(false)
 
                 // Each outcome says its own piece. They used to share one branch, so switching
                 // apps mid-rephrase reported "Copied — paste it in" over the top of the real
                 // reason, and the user was told to paste something that was never copied.
-                when (writeBack(field, result.text)) {
+                when (writeBack(targetPackage, result.text)) {
                     WriteResult.WRITTEN -> {
-                        // A rephrase is never a one-way door: the draft the user actually wrote
-                        // is one tap away until the chip goes.
+                        // The one thing worth a button: a rephrase is never a one-way door, and
+                        // the draft the user actually wrote is one tap away until the chip goes.
                         showStatus(
                             text = "Done ✓",
-                            actions = listOf(BubbleAction("Undo") { undo(field, draft) }),
+                            actions = listOf(BubbleAction("Undo") { undo(targetPackage, draft) }),
                         )
                         clearStatusAfter(ACTION_MESSAGE_MS)
                     }
 
-                    WriteResult.WRONG_APP -> {
-                        showStatus(
-                            "You switched apps before the rephrase finished.",
-                            isError = true,
-                        )
-                        clearStatusAfter(MESSAGE_MS)
-                    }
+                    WriteResult.WRONG_APP ->
+                        flash("You switched apps before the rephrase finished.", isError = true)
 
                     WriteResult.FAILED -> {
                         // Some apps block ACTION_SET_TEXT. The clipboard is the way out (§4.3).
                         copyToClipboard(result.text)
-                        showStatus("Copied — paste it in")
-                        clearStatusAfter(MESSAGE_MS)
+                        flash("Copied — paste it in")
                     }
                 }
             } catch (e: RephraseError) {
                 overlay?.setWorking(false)
-                showStatus(
-                    text = e.userMessage,
-                    isError = true,
-                    actions = listOf(BubbleAction("Retry") { scope.launch { rephraseWith(tone) } }),
-                )
-                clearStatusAfter(ACTION_MESSAGE_MS)
+                // The reason, with nothing to press. A Retry button spends another call on the
+                // user's own key, and tapping the bubble again already does exactly that.
+                flash(e.userMessage, isError = true)
             } catch (e: CancellationException) {
                 // Cancelling is the user getting what they asked for, not a failure. It has to be
                 // caught above the generic handler, or a cancelled run reports itself as broken —
@@ -304,21 +253,24 @@ class RephraseAccessibilityService : AccessibilityService() {
                 throw e
             } catch (e: Exception) {
                 overlay?.setWorking(false)
-                showStatus("The rephrase could not be generated.", isError = true)
-                clearStatusAfter(MESSAGE_MS)
+                flash("The rephrase could not be generated.", isError = true)
             }
         }
     }
 
-    /** Puts the draft the user wrote back into the field. */
-    private fun undo(field: FocusedField, originalText: String) {
+    /**
+     * Puts the draft the user wrote back into the field.
+     *
+     * Says nothing when it works — the user is looking at their own words back in the field, which
+     * is the whole confirmation. Only a failure needs wording.
+     */
+    private fun undo(targetPackage: String, originalText: String) {
         scope.launch {
-            if (writeBack(field, originalText) == WriteResult.WRITTEN) {
-                showStatus("Your text is back")
+            if (writeBack(targetPackage, originalText) == WriteResult.WRITTEN) {
+                overlay?.setStatus(null)
             } else {
-                showStatus("Could not undo — the field has moved on.", isError = true)
+                flash("Could not undo — the field has moved on.", isError = true)
             }
-            clearStatusAfter(MESSAGE_MS)
         }
     }
 
@@ -358,12 +310,12 @@ class RephraseAccessibilityService : AccessibilityService() {
      * the bubble appeared can be stale by now, especially in apps built on WebView; and refuse to
      * write if the user switched apps while the AI was working.
      */
-    private suspend fun writeBack(field: FocusedField, text: String): WriteResult =
+    private suspend fun writeBack(targetPackage: String, text: String): WriteResult =
         withContext(Dispatchers.Main) {
             val live = findEditableNode() ?: return@withContext WriteResult.FAILED
 
             val livePackage = live.packageName?.toString().orEmpty()
-            if (livePackage != field.packageName) return@withContext WriteResult.WRONG_APP
+            if (livePackage != targetPackage) return@withContext WriteResult.WRONG_APP
 
             val args = Bundle().apply {
                 putCharSequence(
@@ -393,14 +345,20 @@ class RephraseAccessibilityService : AccessibilityService() {
         return if (node.isEditable && node.isEnabled && !node.isPassword) node else null
     }
 
-    private fun applyAppearance() {
+    /**
+     * Keeps the bubble's look and its presence in step with the settings.
+     *
+     * This is what makes the switch on the Home screen immediate: flipping it on puts the bubble
+     * up there and then, rather than at the next time the user happens to tap into a text field.
+     */
+    private fun observeSettings() {
         scope.launch {
             settings.observeSettings().collect { current ->
                 val accent = runCatching {
                     android.graphics.Color.parseColor(current.accentColor)
                 }.getOrDefault(DEFAULT_ACCENT_ARGB)
                 overlay?.setAppearance(accent, dark = isDarkTheme(current.themeMode))
-                if (!current.bubbleEnabled) hideBubble("setting off")
+                syncBubble()
             }
         }
     }
@@ -414,8 +372,16 @@ class RephraseAccessibilityService : AccessibilityService() {
                 Configuration.UI_MODE_NIGHT_YES
     }
 
+    /**
+     * Clears any message, but leaves the bubble up.
+     *
+     * The bubble is not feedback the system is asking us to stop — it is a control the user
+     * switched on, and taking it away here would leave them with nothing to tap and no way to
+     * understand why.
+     */
     override fun onInterrupt() {
-        hideBubble("interrupted")
+        handler.removeCallbacks(clearStatus)
+        overlay?.setStatus(null)
     }
 
     override fun onDestroy() {
@@ -427,12 +393,10 @@ class RephraseAccessibilityService : AccessibilityService() {
 
     private companion object {
         const val TAG = "RephraseA11yService"
-        const val FOCUS_DEBOUNCE_MS = 150L
         const val MESSAGE_MS = 3000L
 
-        /** Long enough to notice an Undo or Retry button and reach for it. */
+        /** Long enough to notice the Undo button and reach for it. */
         const val ACTION_MESSAGE_MS = 8000L
-        const val MIN_FIELD_PX = 24
         const val DEFAULT_ACCENT_ARGB = 0xFF8AB4FF.toInt()
     }
 }

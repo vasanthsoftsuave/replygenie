@@ -6,7 +6,6 @@ import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
-import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.util.TypedValue
 import android.view.Gravity
@@ -79,20 +78,27 @@ class BubbleOverlay(
         bubbleView?.findViewWithTag<GeneratingRing>(TAG_RING)?.setAccent(accent)
     }
 
-    fun showNear(bounds: Rect) {
-        hideSheet()
-        val view = bubbleView ?: createBubble().also { bubbleView = it }
-
-        val (x, y) = manualPosition ?: positionFor(bounds)
-        val params = view.layoutParams as? WindowManager.LayoutParams ?: bubbleParams()
-        params.x = x
-        params.y = y
-
-        if (view.isAttachedToWindow) {
-            windowManager.updateViewLayout(view, params)
-        } else {
-            addViewLogged(view, params)
+    /**
+     * Puts the bubble on screen and leaves it there until [hide].
+     *
+     * Does nothing when the bubble is already up. It is called again on every app change, and
+     * re-adding or re-positioning the window each time would drag the bubble back off the spot the
+     * user put it and close the tone sheet from under their finger.
+     */
+    fun show() {
+        bubbleView?.takeIf { it.isAttachedToWindow }?.let { view ->
+            view.visibility = View.VISIBLE
+            return
         }
+
+        val view = bubbleView ?: createBubble().also { bubbleView = it }
+        val (x, y) = manualPosition ?: defaultPosition()
+        val params = bubbleParams().apply {
+            this.x = x
+            this.y = y
+        }
+
+        addViewLogged(view, params)
         view.visibility = View.VISIBLE
     }
 
@@ -239,7 +245,7 @@ class BubbleOverlay(
     // The scrim is a bare catcher with no click semantics of its own: any touch dismisses the
     // sheet, which is why it does not go through performClick.
     @SuppressLint("ClickableViewAccessibility")
-    fun showToneSheet(tones: List<Tone>) {
+    fun showToneSheet(tones: List<Tone>, selectedToneId: String?) {
         hideSheet()
         val bubbleParams = bubbleView?.layoutParams as? WindowManager.LayoutParams
 
@@ -264,10 +270,8 @@ class BubbleOverlay(
             setPadding(dp(8), dp(8), dp(8), dp(8))
         }
 
-        // Tapping a tone rephrases straight away. On Windows this only changed the default and the
-        // user then had to click again, which is three actions for one job.
         tones.take(MAX_SHEET_TONES).forEach { tone ->
-            container.addView(createTonePill(tone))
+            container.addView(createTonePill(tone, selected = tone.id == selectedToneId))
         }
 
         val scroll = ScrollView(service).apply { addView(container) }
@@ -320,13 +324,26 @@ class BubbleOverlay(
         statusView = null
     }
 
-    private fun createTonePill(tone: Tone): View {
+    private fun createTonePill(tone: Tone, selected: Boolean): View {
         val row = LinearLayout(service).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12), dp(10), dp(12), dp(10))
             isClickable = true
             setOnClickListener { onToneChosen(tone) }
+            if (selected) {
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(8).toFloat()
+                    setColor(
+                        Color.argb(
+                            SELECTED_TINT_ALPHA,
+                            Color.red(accentColor),
+                            Color.green(accentColor),
+                            Color.blue(accentColor),
+                        )
+                    )
+                }
+            }
         }
 
         val dotColor = runCatching { Color.parseColor(tone.color ?: "#8AB4FF") }
@@ -346,10 +363,26 @@ class BubbleOverlay(
             text = tone.name
             setTextColor(if (isDark) Color.parseColor("#EEF0F5") else Color.parseColor("#0F172A"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            // Takes the spare width, so the tick sits against the right edge of the sheet.
+            layoutParams = LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f,
+            )
+        }
+
+        // Held in the layout even when unselected, so the names do not shift sideways as the
+        // choice moves down the list.
+        val tick = TextView(service).apply {
+            text = "✓"
+            setTextColor(accentColor)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            visibility = if (selected) View.VISIBLE else View.INVISIBLE
         }
 
         row.addView(dot)
         row.addView(label)
+        row.addView(tick)
         return row
     }
 
@@ -522,12 +555,17 @@ class BubbleOverlay(
         }
     }
 
-    /** Just below and to the right of the field, matching the Windows placement. */
-    private fun positionFor(bounds: Rect): Pair<Int, Int> {
+    /**
+     * Where the bubble starts life: against the right edge, a little below the middle.
+     *
+     * It no longer opens next to the focused field, because it is no longer tied to one — it is on
+     * screen from the moment the switch goes on. Low and to the side keeps it clear of app
+     * toolbars above and the keyboard below.
+     */
+    private fun defaultPosition(): Pair<Int, Int> {
         val metrics = service.resources.displayMetrics
-        val x = (bounds.right - (bubbleSizePx * 0.4f)).roundToInt()
-            .coerceIn(0, metrics.widthPixels - bubbleSizePx)
-        val y = (bounds.bottom + dp(6))
+        val x = metrics.widthPixels - bubbleSizePx - dp(4)
+        val y = (metrics.heightPixels * DEFAULT_Y_FRACTION).roundToInt()
             .coerceIn(0, metrics.heightPixels - bubbleSizePx)
         return x to y
     }
@@ -553,5 +591,7 @@ class BubbleOverlay(
         const val MAX_SHEET_TONES = 20
         const val SNAP_MS = 180L
         const val PULSE_MS = 620L
+        const val DEFAULT_Y_FRACTION = 0.55f
+        const val SELECTED_TINT_ALPHA = 0x33
     }
 }
